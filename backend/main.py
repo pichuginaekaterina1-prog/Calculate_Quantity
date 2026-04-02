@@ -18,12 +18,31 @@ storage = {
     "columns": [],
 }
 
+
 class CrosstabRequest(BaseModel):
     row_question: str
     col_question: str
     selected_row_values: list[str] | None = None
     selected_col_values: list[str] | None = None
     scale5: bool = False
+
+
+@app.get("/")
+def root():
+    return {
+        "message": "Survey Cross-tab API is running",
+        "docs": "/docs",
+        "health": "/health",
+        "uploaded": storage["df"] is not None,
+    }
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "uploaded": storage["df"] is not None,
+    }
 
 
 @app.post("/upload")
@@ -105,7 +124,7 @@ def crosstab(req: CrosstabRequest):
 
     if req.scale5:
         def agg_scale(q):
-            s = pd.to_numeric(df[q], errors='coerce')
+            s = pd.to_numeric(df[q], errors="coerce")
             total = s.notna().sum() or 1
             top2 = s[s >= 4].count() / total * 100
             bottom2 = s[s <= 2].count() / total * 100
