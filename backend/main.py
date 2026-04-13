@@ -4,6 +4,7 @@ import pandas as pd
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from openpyxl.styles import PatternFill
 from pydantic import BaseModel
 
 MULTI_MARKER = "(Множественный выбор)_"
@@ -41,6 +42,8 @@ class CrosstabRequest(BaseModel):
     row_questions: list[str] | None = None
     col_questions: list[str] | None = None
     metrics: list[str] | None = None
+    significance: bool = False
+    combine_columns: bool = False
     row_question: str | None = None
     col_question: str | None = None
     selected_row_values: list[str] | None = None
@@ -186,6 +189,154 @@ def get_question_categories(df: pd.DataFrame, question: dict) -> list[dict]:
     ]
 
 
+def build_standard_columns(
+    df: pd.DataFrame,
+    row_answered_mask: pd.Series,
+    col_questions: list[dict],
+) -> list[dict]:
+    columns = [
+        {
+            "group": "Итого",
+            "label": "Итого",
+            "base": int(row_answered_mask.sum()),
+            "mask": row_answered_mask,
+        }
+    ]
+
+    for col_question in col_questions:
+        for col_category in get_question_categories(df, col_question):
+            base_mask = row_answered_mask & col_category["mask"]
+            columns.append(
+                {
+                    "group": col_question["name"],
+                    "label": col_category["label"],
+                    "base": int(base_mask.sum()),
+                    "mask": base_mask,
+                }
+            )
+
+    return columns
+
+
+def build_combined_columns(
+    df: pd.DataFrame,
+    row_answered_mask: pd.Series,
+    col_questions: list[dict],
+) -> list[dict]:
+    columns = [
+        {
+            "group": "Итого",
+            "label": "Итого",
+            "base": int(row_answered_mask.sum()),
+            "mask": row_answered_mask,
+        }
+    ]
+
+    category_groups = [get_question_categories(df, col_question) for col_question in col_questions]
+    if not category_groups:
+        return columns
+
+    combinations = [([], row_answered_mask)]
+    for category_group in category_groups:
+        next_combinations = []
+        for labels, mask in combinations:
+            for category in category_group:
+                next_combinations.append((labels + [category["label"]], mask & category["mask"]))
+        combinations = next_combinations
+
+    for labels, mask in combinations:
+        flat_label = " | ".join(labels)
+        if len(labels) >= 2:
+            group = labels[0]
+            label = " | ".join(labels[1:])
+        else:
+            group = col_questions[0]["name"]
+            label = flat_label
+
+        base_mask = row_answered_mask & mask
+        columns.append(
+            {
+                "group": group,
+                "label": label,
+                "flat_label": flat_label,
+                "base": int(base_mask.sum()),
+                "mask": base_mask,
+            }
+        )
+
+    return columns
+
+
+def is_significant_difference(count_a: int, base_a: int, count_b: int, base_b: int) -> bool:
+    if base_a < 50 or base_b < 50 or base_a == 0 or base_b == 0:
+        return False
+
+    p1 = count_a / base_a
+    p2 = count_b / base_b
+    pooled = (count_a + count_b) / (base_a + base_b)
+    variance = pooled * (1 - pooled) * ((1 / base_a) + (1 / base_b))
+    if variance <= 0:
+        return False
+
+    z_score = abs((p1 - p2) / (variance ** 0.5))
+    return z_score >= 1.959963984540054
+
+
+def build_significance_styles(
+    row_counts: dict[str, dict[str, int]],
+    columns_by_key: dict[str, dict],
+) -> dict[str, dict[str, str]]:
+    styles = {}
+    grouped_keys = {}
+
+    for column_key, column in columns_by_key.items():
+        if column["group"] == "Итого":
+            continue
+        grouped_keys.setdefault(column["group"], []).append(column_key)
+
+    for row_key, counts in row_counts.items():
+        row_styles = {}
+
+        for group_keys in grouped_keys.values():
+            for column_key in group_keys:
+                base = columns_by_key[column_key]["base"]
+                if base < 50:
+                    row_styles[column_key] = "low_base"
+                    continue
+
+                higher = False
+                lower = False
+                current_count = counts[column_key]
+
+                for other_key in group_keys:
+                    if other_key == column_key:
+                        continue
+
+                    other_base = columns_by_key[other_key]["base"]
+                    if other_base < 50:
+                        continue
+
+                    other_count = counts[other_key]
+                    if not is_significant_difference(current_count, base, other_count, other_base):
+                        continue
+
+                    current_share = current_count / base
+                    other_share = other_count / other_base
+                    if current_share > other_share:
+                        higher = True
+                    elif current_share < other_share:
+                        lower = True
+
+                if higher and not lower:
+                    row_styles[column_key] = "higher"
+                elif lower and not higher:
+                    row_styles[column_key] = "lower"
+
+        styles[row_key] = row_styles
+
+    return styles
+
+
 def format_metric_value(metric: str, count: int, base: int) -> float | int:
     if metric == "count":
         return int(count)
@@ -197,55 +348,51 @@ def build_metric_table(
     row_question: dict,
     col_questions: list[dict],
     metric: str,
+    combine_columns: bool = False,
+    significance: bool = False,
 ) -> dict:
     row_answered_mask = get_answered_mask(df, row_question)
     row_categories = get_question_categories(df, row_question)
-    base_total = int(row_answered_mask.sum())
-
-    columns = [
-        {
-            "group": "Итого",
-            "label": "Итого",
-            "base": base_total,
-            "mask": row_answered_mask,
-        }
-    ]
-
-    for col_question in col_questions:
-        col_categories = get_question_categories(df, col_question)
-        for col_category in col_categories:
-            base_mask = row_answered_mask & col_category["mask"]
-            base = int(base_mask.sum())
-            columns.append(
-                {
-                    "group": col_question["name"],
-                    "label": col_category["label"],
-                    "base": base,
-                    "mask": base_mask,
-                }
-            )
+    columns = (
+        build_combined_columns(df, row_answered_mask, col_questions)
+        if combine_columns
+        else build_standard_columns(df, row_answered_mask, col_questions)
+    )
+    column_keys = [f"col_{index}" for index in range(len(columns))]
+    columns_by_key = {key: column for key, column in zip(column_keys, columns)}
 
     rows = []
+    row_counts = {}
     for row_category in row_categories:
         row_values = {}
+        raw_counts = {}
 
-        for column in columns:
+        for column_key, column in columns_by_key.items():
             count = int((column["mask"] & row_category["mask"]).sum())
-            row_values[column["label"]] = format_metric_value(metric, count, column["base"])
+            raw_counts[column_key] = count
+            row_values[column_key] = format_metric_value(metric, count, column["base"])
         rows.append({"label": row_category["label"], "values": row_values})
+        row_counts[row_category["label"]] = raw_counts
 
-    column_keys = [f"col_{index}" for index in range(len(columns))]
     column_labels = {key: column["label"] for key, column in zip(column_keys, columns)}
     column_groups = {key: column["group"] for key, column in zip(column_keys, columns)}
     bases = {key: column["base"] for key, column in zip(column_keys, columns)}
 
+    significance_styles = (
+        build_significance_styles(row_counts, columns_by_key)
+        if significance and metric == "percent"
+        else {}
+    )
+
     normalized_rows = []
     for row in rows:
-        normalized_values = {
-            key: row["values"][column["label"]]
-            for key, column in zip(column_keys, columns)
-        }
-        normalized_rows.append({"label": row["label"], "values": normalized_values})
+        normalized_rows.append(
+            {
+                "label": row["label"],
+                "values": row["values"],
+                "styles": significance_styles.get(row["label"], {}),
+            }
+        )
 
     return {
         "row_question": row_question["name"],
@@ -259,11 +406,13 @@ def build_metric_table(
         "column_groups": column_groups,
         "rows": normalized_rows,
         "bases": bases,
+        "significance_enabled": significance and metric == "percent",
+        "combine_columns": combine_columns,
         "base_description": "База - фактическое количество ответивших на вопрос в каждой группе.",
     }
 
 
-def resolve_crosstab_request(req: CrosstabRequest) -> tuple[pd.DataFrame, list[dict], list[dict], list[str]]:
+def resolve_crosstab_request(req: CrosstabRequest) -> tuple[pd.DataFrame, list[dict], list[dict], list[str], bool, bool]:
     row_question_names = req.row_questions or ([req.row_question] if req.row_question else [])
     col_question_names = req.col_questions or ([req.col_question] if req.col_question else [])
     metrics = req.metrics or ["count", "percent"]
@@ -282,14 +431,14 @@ def resolve_crosstab_request(req: CrosstabRequest) -> tuple[pd.DataFrame, list[d
     row_questions = [get_question_definition(question_name) for question_name in row_question_names]
     col_questions = [get_question_definition(question_name) for question_name in col_question_names]
 
-    return df, row_questions, col_questions, metrics
+    return df, row_questions, col_questions, metrics, req.combine_columns, req.significance
 
 
 def build_tables_for_request(req: CrosstabRequest) -> dict:
-    df, row_questions, col_questions, metrics = resolve_crosstab_request(req)
+    df, row_questions, col_questions, metrics, combine_columns, significance = resolve_crosstab_request(req)
 
     tables = [
-        build_metric_table(df, row_question, col_questions, metric)
+        build_metric_table(df, row_question, col_questions, metric, combine_columns, significance)
         for row_question in row_questions
         for metric in metrics
     ]
@@ -299,6 +448,8 @@ def build_tables_for_request(req: CrosstabRequest) -> dict:
         "row_questions": [question["name"] for question in row_questions],
         "col_questions": [question["name"] for question in col_questions],
         "metrics": metrics,
+        "combine_columns": combine_columns,
+        "significance": significance,
     }
 
 
@@ -325,6 +476,11 @@ def build_export_workbook(tables: list[dict]) -> BytesIO:
         "count": "Количество (N)",
         "percent": "% по столбцу",
     }
+    fills = {
+        "higher": PatternFill(fill_type="solid", fgColor="A4EC9E"),
+        "lower": PatternFill(fill_type="solid", fgColor="F0B3B2"),
+        "low_base": PatternFill(fill_type="solid", fgColor="DADAD8"),
+    }
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for metric, sheet_name in metric_to_sheet.items():
@@ -344,20 +500,29 @@ def build_export_workbook(tables: list[dict]) -> BytesIO:
             )
 
             worksheet = writer.sheets[sheet_name]
-            if metric == "percent":
-                row_idx = 1
-                for table in metric_tables:
-                    row_idx += 4
-                    data_row_count = len(table["rows"])
-                    start_col = 2
-                    end_col = len(table["column_order"]) + 1
-                    for excel_row in range(row_idx, row_idx + data_row_count):
+            row_idx = 1
+            for table in metric_tables:
+                data_start_row = row_idx + 3
+                data_row_count = len(table["rows"])
+                start_col = 2
+                end_col = len(table["column_order"]) + 1
+
+                if metric == "percent":
+                    for excel_row in range(data_start_row, data_start_row + data_row_count):
+                        row_offset = excel_row - data_start_row
                         for excel_col in range(start_col, end_col + 1):
+                            column_offset = excel_col - start_col
                             cell = worksheet.cell(row=excel_row, column=excel_col)
                             cell.value = (cell.value or 0) / 100
                             cell.number_format = "0%"
-                    row_idx += data_row_count + 3
-                # Base and descriptive rows stay numeric/text without percent format.
+
+                            style_key = table["rows"][row_offset].get("styles", {}).get(
+                                table["column_order"][column_offset]
+                            )
+                            if style_key in fills:
+                                cell.fill = fills[style_key]
+
+                row_idx = data_start_row + data_row_count + 3
 
     output.seek(0)
     return output

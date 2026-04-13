@@ -157,6 +157,13 @@
       background: #fcf8f1;
     }
 
+    .options-grid {
+      display: grid;
+      grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr);
+      gap: 18px;
+      margin-top: 18px;
+    }
+
     .metric-chip {
       display: inline-flex;
       align-items: center;
@@ -263,8 +270,30 @@
       font-size: 13px;
     }
 
+    .tooltip-label {
+      text-decoration: underline dotted;
+      text-underline-offset: 3px;
+      cursor: help;
+    }
+
+    .cell-higher {
+      background: #A4EC9E;
+    }
+
+    .cell-lower {
+      background: #F0B3B2;
+    }
+
+    .cell-low-base {
+      background: #DADAD8;
+    }
+
     @media (max-width: 920px) {
       .selectors-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .options-grid {
         grid-template-columns: 1fr;
       }
 
@@ -320,12 +349,28 @@
         </div>
       </div>
 
-      <div class="metric-panel">
-        <h3>3) Что считаем</h3>
-        <div class="metric-row">
-          <label class="metric-chip"><input type="checkbox" id="metricCount" checked /> Количество (N)</label>
-          <label class="metric-chip"><input type="checkbox" id="metricPercent" checked /> % по столбцу</label>
-          <label class="metric-chip"><input type="checkbox" id="metricAll" checked /> Выбрать все</label>
+      <div class="options-grid">
+        <div class="metric-panel">
+          <h3>3) Что считаем</h3>
+          <div class="metric-row">
+            <label class="metric-chip"><input type="checkbox" id="metricCount" checked /> Количество (N)</label>
+            <label class="metric-chip"><input type="checkbox" id="metricPercent" checked /> % по столбцу</label>
+            <label class="metric-chip"><input type="checkbox" id="metricAll" checked /> Выбрать все</label>
+          </div>
+        </div>
+
+        <div class="metric-panel">
+          <h3>Дополнительно</h3>
+          <div class="metric-row">
+            <label class="metric-chip">
+              <input type="checkbox" id="optionSignificance" />
+              <span class="tooltip-label" title="Сравнение долей внутри срезов между подгруппами, z-test, p < 0.05">Стат.значимости и их маркировка</span>
+            </label>
+            <label class="metric-chip">
+              <input type="checkbox" id="optionCombineColumns" />
+              <span class="tooltip-label" title="По умолчанию выбранные столбцы строятся отдельно. Включай - только если надо вложить один срез в другой, например, возраст внутри пола">Комбинировать выбранные столбцы во 2-й уровень</span>
+            </label>
+          </div>
         </div>
       </div>
 
@@ -405,6 +450,19 @@
       return String(value);
     }
 
+    function getCellClass(styleKey) {
+      if (styleKey === "higher") {
+        return "cell-higher";
+      }
+      if (styleKey === "lower") {
+        return "cell-lower";
+      }
+      if (styleKey === "low_base") {
+        return "cell-low-base";
+      }
+      return "";
+    }
+
     function renderSingleTable(tableData) {
       const columnOrder = tableData.column_order || [];
       const columnLabels = tableData.column_labels || {};
@@ -459,7 +517,8 @@
         rows.forEach((row) => {
           html += `<tr><td>${escapeHtml(row.label)}</td>`;
           columnOrder.forEach((columnKey) => {
-            html += `<td>${formatCellValue(tableData.metric, row.values?.[columnKey] ?? 0)}</td>`;
+            const cellClass = getCellClass(row.styles?.[columnKey]);
+            html += `<td class="${cellClass}">${formatCellValue(tableData.metric, row.values?.[columnKey] ?? 0)}</td>`;
           });
           html += '</tr>';
         });
@@ -536,6 +595,8 @@
         row_questions: rowQuestions,
         col_questions: colQuestions,
         metrics,
+        significance: document.getElementById("optionSignificance").checked,
+        combine_columns: document.getElementById("optionCombineColumns").checked,
       };
     }
 
