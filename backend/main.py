@@ -3,6 +3,7 @@ from io import BytesIO
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 MULTI_MARKER = "(Множественный выбор)_"
@@ -244,6 +245,89 @@ def build_metric_table(
     }
 
 
+def resolve_crosstab_request(req: CrosstabRequest) -> tuple[pd.DataFrame, list[dict], list[dict], list[str]]:
+    row_question_names = req.row_questions or ([req.row_question] if req.row_question else [])
+    col_question_names = req.col_questions or ([req.col_question] if req.col_question else [])
+    metrics = req.metrics or ["count", "percent"]
+    metrics = [metric for metric in metrics if metric in {"count", "percent"}]
+
+    if not row_question_names or not col_question_names:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one row question and one column question must be selected",
+        )
+
+    if not metrics:
+        raise HTTPException(status_code=400, detail="At least one metric must be selected")
+
+    df = storage["df"].copy()
+    row_questions = [get_question_definition(question_name) for question_name in row_question_names]
+    col_questions = [get_question_definition(question_name) for question_name in col_question_names]
+
+    return df, row_questions, col_questions, metrics
+
+
+def build_tables_for_request(req: CrosstabRequest) -> dict:
+    df, row_questions, col_questions, metrics = resolve_crosstab_request(req)
+
+    tables = [
+        build_metric_table(df, row_question, col_question, metric)
+        for row_question in row_questions
+        for col_question in col_questions
+        for metric in metrics
+    ]
+
+    return {
+        "tables": tables,
+        "row_questions": [question["name"] for question in row_questions],
+        "col_questions": [question["name"] for question in col_questions],
+        "metrics": metrics,
+    }
+
+
+def append_table_to_sheet_rows(sheet_rows: list[list], table: dict):
+    sheet_rows.append([f'{table["row_question"]} x {table["col_question"]}'])
+    sheet_rows.append([table["metric_label"]])
+    sheet_rows.append(["Варианты ответа", *table["column_labels"]])
+
+    for row in table["rows"]:
+        sheet_rows.append(
+            [row["label"], *[row["values"].get(column_label, 0) for column_label in table["column_labels"]]]
+        )
+
+    sheet_rows.append(["База", *[table["bases"].get(column_label, 0) for column_label in table["column_labels"]]])
+    sheet_rows.append([table["base_description"]])
+    sheet_rows.append([])
+
+
+def build_export_workbook(tables: list[dict]) -> BytesIO:
+    output = BytesIO()
+    metric_to_sheet = {
+        "count": "Количество (N)",
+        "percent": "% по столбцу",
+    }
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for metric, sheet_name in metric_to_sheet.items():
+            metric_tables = [table for table in tables if table["metric"] == metric]
+            if not metric_tables:
+                continue
+
+            sheet_rows = []
+            for table in metric_tables:
+                append_table_to_sheet_rows(sheet_rows, table)
+
+            pd.DataFrame(sheet_rows).to_excel(
+                writer,
+                sheet_name=sheet_name,
+                index=False,
+                header=False,
+            )
+
+    output.seek(0)
+    return output
+
+
 @app.post("/upload")
 async def upload_excel(file: UploadFile = File(...)):
     if file.content_type not in [
@@ -308,34 +392,21 @@ def crosstab(req: CrosstabRequest):
     if storage["df"] is None:
         raise HTTPException(status_code=404, detail="No data uploaded")
 
-    row_question_names = req.row_questions or ([req.row_question] if req.row_question else [])
-    col_question_names = req.col_questions or ([req.col_question] if req.col_question else [])
-    metrics = req.metrics or ["count", "percent"]
-    metrics = [metric for metric in metrics if metric in {"count", "percent"}]
+    return build_tables_for_request(req)
 
-    if not row_question_names or not col_question_names:
-        raise HTTPException(
-            status_code=400,
-            detail="At least one row question and one column question must be selected",
-        )
 
-    if not metrics:
-        raise HTTPException(status_code=400, detail="At least one metric must be selected")
+@app.post("/export/xlsx")
+def export_xlsx(req: CrosstabRequest):
+    if storage["df"] is None:
+        raise HTTPException(status_code=404, detail="No data uploaded")
 
-    df = storage["df"].copy()
-    row_questions = [get_question_definition(question_name) for question_name in row_question_names]
-    col_questions = [get_question_definition(question_name) for question_name in col_question_names]
+    result = build_tables_for_request(req)
+    workbook = build_export_workbook(result["tables"])
 
-    tables = [
-        build_metric_table(df, row_question, col_question, metric)
-        for row_question in row_questions
-        for col_question in col_questions
-        for metric in metrics
-    ]
-
-    return {
-        "tables": tables,
-        "row_questions": row_question_names,
-        "col_questions": col_question_names,
-        "metrics": metrics,
-    }
+    return StreamingResponse(
+        workbook,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="crosstab_export.xlsx"',
+        },
+    )
