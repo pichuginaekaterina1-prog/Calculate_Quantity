@@ -3,7 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openpyxl.styles import PatternFill
@@ -642,3 +642,23 @@ def export_xlsx(req: CrosstabRequest):
             "Content-Disposition": 'attachment; filename="crosstab_export.xlsx"',
         },
     )
+
+
+@app.get("/export/xlsx")
+def export_xlsx_get(
+    upload_id: str,
+    row_questions: list[str] = Query(...),
+    col_questions: list[str] = Query(...),
+    metrics: list[str] = Query(...),
+    significance: bool = False,
+    combine_columns: bool = False,
+):
+    req = CrosstabRequest(
+        upload_id=upload_id,
+        row_questions=row_questions,
+        col_questions=col_questions,
+        metrics=metrics,
+        significance=significance,
+        combine_columns=combine_columns,
+    )
+    return export_xlsx(req)

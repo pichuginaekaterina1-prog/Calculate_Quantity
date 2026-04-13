@@ -706,31 +706,21 @@
       exportButton.disabled = true;
 
       try {
-        const response = await fetch(`${apiUrl}/export/xlsx`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
+        const params = new URLSearchParams();
+        params.set("upload_id", payload.upload_id);
+        payload.row_questions.forEach((value) => params.append("row_questions", value));
+        payload.col_questions.forEach((value) => params.append("col_questions", value));
+        payload.metrics.forEach((value) => params.append("metrics", value));
+        params.set("significance", String(payload.significance));
+        params.set("combine_columns", String(payload.combine_columns));
 
-        if (!response.ok) {
-          let message = response.statusText;
-          try {
-            const errorPayload = await response.json();
-            message = errorPayload.detail || message;
-          } catch (error) {
-          }
-          throw new Error(message);
-        }
-
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
+        const url = `${apiUrl}/export/xlsx?${params.toString()}`;
         const link = document.createElement("a");
         link.href = url;
         link.download = "crosstab_export.xlsx";
         document.body.appendChild(link);
         link.click();
         link.remove();
-        URL.revokeObjectURL(url);
         info.textContent = "Excel-файл выгружен.";
       } catch (error) {
         info.textContent = `Ошибка выгрузки: ${error.message}`;
