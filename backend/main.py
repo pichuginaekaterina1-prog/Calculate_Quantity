@@ -1,4 +1,5 @@
 from io import BytesIO
+from uuid import uuid4
 
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -31,14 +32,12 @@ app.add_middleware(
 )
 
 storage = {
-    "df": None,
-    "columns": [],
-    "questions_meta": [],
-    "question_map": {},
+    "uploads": {},
 }
 
 
 class CrosstabRequest(BaseModel):
+    upload_id: str | None = None
     row_questions: list[str] | None = None
     col_questions: list[str] | None = None
     metrics: list[str] | None = None
@@ -57,7 +56,7 @@ def root():
         "message": "Survey Cross-tab API is running",
         "docs": "/docs",
         "health": "/health",
-        "uploaded": storage["df"] is not None,
+        "uploaded": bool(storage["uploads"]),
     }
 
 
@@ -65,8 +64,19 @@ def root():
 def health():
     return {
         "status": "ok",
-        "uploaded": storage["df"] is not None,
+        "uploaded": bool(storage["uploads"]),
     }
+
+
+def get_upload_data(upload_id: str | None) -> dict:
+    if not upload_id:
+        raise HTTPException(status_code=400, detail="upload_id is required")
+
+    upload_data = storage["uploads"].get(upload_id)
+    if upload_data is None:
+        raise HTTPException(status_code=404, detail="No data uploaded")
+
+    return upload_data
 
 
 def normalize_value(value) -> str:
@@ -155,8 +165,8 @@ def build_question_catalog(df: pd.DataFrame) -> tuple[list[dict], dict[str, dict
     return questions, question_map
 
 
-def get_question_definition(question_name: str) -> dict:
-    question = storage["question_map"].get(question_name)
+def get_question_definition(upload_data: dict, question_name: str) -> dict:
+    question = upload_data["question_map"].get(question_name)
     if question is None:
         raise HTTPException(status_code=404, detail=f"Question not found: {question_name}")
     return question
@@ -427,9 +437,10 @@ def resolve_crosstab_request(req: CrosstabRequest) -> tuple[pd.DataFrame, list[d
     if not metrics:
         raise HTTPException(status_code=400, detail="At least one metric must be selected")
 
-    df = storage["df"].copy()
-    row_questions = [get_question_definition(question_name) for question_name in row_question_names]
-    col_questions = [get_question_definition(question_name) for question_name in col_question_names]
+    upload_data = get_upload_data(req.upload_id)
+    df = upload_data["df"].copy()
+    row_questions = [get_question_definition(upload_data, question_name) for question_name in row_question_names]
+    col_questions = [get_question_definition(upload_data, question_name) for question_name in col_question_names]
 
     return df, row_questions, col_questions, metrics, req.combine_columns, req.significance
 
@@ -548,35 +559,37 @@ async def upload_excel(file: UploadFile = File(...)):
 
     questions_meta, question_map = build_question_catalog(df)
 
-    storage["df"] = df
-    storage["columns"] = df.columns.astype(str).tolist()
-    storage["questions_meta"] = questions_meta
-    storage["question_map"] = question_map
+    upload_id = uuid4().hex
+    storage["uploads"][upload_id] = {
+        "df": df,
+        "columns": df.columns.astype(str).tolist(),
+        "questions_meta": questions_meta,
+        "question_map": question_map,
+    }
 
     return {
+        "upload_id": upload_id,
         "rows": len(df),
-        "columns": storage["columns"],
+        "columns": df.columns.astype(str).tolist(),
         "questions": [question["name"] for question in questions_meta],
     }
 
 
 @app.get("/questions")
-def questions():
-    if storage["df"] is None:
-        raise HTTPException(status_code=404, detail="No data uploaded")
+def questions(upload_id: str):
+    upload_data = get_upload_data(upload_id)
 
     return {
-        "questions": [question["name"] for question in storage["questions_meta"]],
-        "items": storage["questions_meta"],
+        "questions": [question["name"] for question in upload_data["questions_meta"]],
+        "items": upload_data["questions_meta"],
     }
 
 
 @app.get("/choices")
-def choices(question: str):
-    if storage["df"] is None:
-        raise HTTPException(status_code=404, detail="No data uploaded")
+def choices(question: str, upload_id: str):
+    upload_data = get_upload_data(upload_id)
 
-    question_def = get_question_definition(question)
+    question_def = get_question_definition(upload_data, question)
 
     if question_def["kind"] == "single":
         return {"question": question, "choices": question_def.get("choices", [])}
@@ -589,17 +602,11 @@ def choices(question: str):
 
 @app.post("/crosstab")
 def crosstab(req: CrosstabRequest):
-    if storage["df"] is None:
-        raise HTTPException(status_code=404, detail="No data uploaded")
-
     return build_tables_for_request(req)
 
 
 @app.post("/export/xlsx")
 def export_xlsx(req: CrosstabRequest):
-    if storage["df"] is None:
-        raise HTTPException(status_code=404, detail="No data uploaded")
-
     result = build_tables_for_request(req)
     workbook = build_export_workbook(result["tables"])
 
