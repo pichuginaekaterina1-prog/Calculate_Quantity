@@ -375,8 +375,8 @@
       </div>
 
       <div class="build-row" style="margin-top: 18px;">
-        <button id="build">Считать кросс-таб</button>
-        <button id="export" class="secondary">Выгрузить</button>
+        <button id="build" type="button">Считать кросс-таб</button>
+        <button id="export" type="button" class="secondary">Выгрузить</button>
       </div>
 
       <div id="crosstabInfo" class="status"></div>
@@ -647,23 +647,33 @@
         return;
       }
 
-      const response = await fetch(`${apiUrl}/crosstab`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        const errorPayload = await response.json();
-        alert(`Ошибка: ${errorPayload.detail || response.statusText}`);
-        return;
-      }
-
-      const data = await response.json();
-      const tables = data.tables || [];
       const info = document.getElementById("crosstabInfo");
-      info.textContent = `Построено таблиц: ${tables.length}. Вопросов в строках: ${payload.row_questions.length}. Срезов в столбцах: ${payload.col_questions.length}. Метрик: ${payload.metrics.length}.`;
-      document.getElementById("result").innerHTML = tables.map(renderSingleTable).join("");
+      info.textContent = "Расчёт таблиц...";
+
+      try {
+        const response = await fetch(`${apiUrl}/crosstab`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          let message = response.statusText;
+          try {
+            const errorPayload = await response.json();
+            message = errorPayload.detail || message;
+          } catch (error) {
+          }
+          throw new Error(message);
+        }
+
+        const data = await response.json();
+        const tables = data.tables || [];
+        info.textContent = `Построено таблиц: ${tables.length}. Вопросов в строках: ${payload.row_questions.length}. Срезов в столбцах: ${payload.col_questions.length}. Метрик: ${payload.metrics.length}.`;
+        document.getElementById("result").innerHTML = tables.map(renderSingleTable).join("");
+      } catch (error) {
+        info.textContent = `Ошибка расчёта: ${error.message}`;
+      }
     });
 
     document.getElementById("export").addEventListener("click", async () => {
@@ -672,32 +682,43 @@
         return;
       }
 
-      const response = await fetch(`${apiUrl}/export/xlsx`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      const info = document.getElementById("crosstabInfo");
+      const exportButton = document.getElementById("export");
+      info.textContent = "Подготовка Excel-файла...";
+      exportButton.disabled = true;
 
-      if (!response.ok) {
-        let message = response.statusText;
-        try {
-          const errorPayload = await response.json();
-          message = errorPayload.detail || message;
-        } catch (error) {
+      try {
+        const response = await fetch(`${apiUrl}/export/xlsx`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          let message = response.statusText;
+          try {
+            const errorPayload = await response.json();
+            message = errorPayload.detail || message;
+          } catch (error) {
+          }
+          throw new Error(message);
         }
-        alert(`Ошибка выгрузки: ${message}`);
-        return;
-      }
 
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "crosstab_export.xlsx";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "crosstab_export.xlsx";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+        info.textContent = "Excel-файл выгружен.";
+      } catch (error) {
+        info.textContent = `Ошибка выгрузки: ${error.message}`;
+      } finally {
+        exportButton.disabled = false;
+      }
     });
 
     renderQuestionList("rowQuestionList", "rowQuestions");
