@@ -331,6 +331,7 @@
 
       <div class="build-row" style="margin-top: 18px;">
         <button id="build">Считать кросс-таб</button>
+        <button id="export" class="secondary">Выгрузить</button>
       </div>
 
       <div id="crosstabInfo" class="status"></div>
@@ -352,8 +353,12 @@
     }
 
     function describeQuestion(question) {
-      const typeLabel = question.kind === "multi" ? "Множественный вопрос" : (question.is_closed ? "Закрытый вопрос" : "Открытый/свободный вопрос");
-      const variantsLabel = typeof question.unique_count === "number" ? ` • вариантов: ${question.unique_count}` : "";
+      const typeLabel = question.kind === "multi"
+        ? "Множественный вопрос"
+        : (question.is_closed ? "Закрытый вопрос" : "Открытый/свободный вопрос");
+      const variantsLabel = typeof question.unique_count === "number"
+        ? ` • вариантов: ${question.unique_count}`
+        : "";
       return `${typeLabel}${variantsLabel}`;
     }
 
@@ -484,6 +489,28 @@
       return metrics;
     }
 
+    function buildRequestPayload() {
+      const rowQuestions = getSelectedValues("rowQuestions");
+      const colQuestions = getSelectedValues("colQuestions");
+      const metrics = getSelectedMetrics();
+
+      if (!rowQuestions.length || !colQuestions.length) {
+        alert("Выберите хотя бы одну переменную для строк и хотя бы одну переменную для столбцов.");
+        return null;
+      }
+
+      if (!metrics.length) {
+        alert("Выберите хотя бы один показатель для расчёта.");
+        return null;
+      }
+
+      return {
+        row_questions: rowQuestions,
+        col_questions: colQuestions,
+        metrics,
+      };
+    }
+
     document.getElementById("metricAll").addEventListener("change", syncMetricCheckboxesFromAll);
     document.getElementById("metricCount").addEventListener("change", syncAllCheckboxState);
     document.getElementById("metricPercent").addEventListener("change", syncAllCheckboxState);
@@ -526,25 +553,10 @@
     });
 
     document.getElementById("build").addEventListener("click", async () => {
-      const rowQuestions = getSelectedValues("rowQuestions");
-      const colQuestions = getSelectedValues("colQuestions");
-      const metrics = getSelectedMetrics();
-
-      if (!rowQuestions.length || !colQuestions.length) {
-        alert("Выберите хотя бы одну переменную для строк и хотя бы одну переменную для столбцов.");
+      const payload = buildRequestPayload();
+      if (!payload) {
         return;
       }
-
-      if (!metrics.length) {
-        alert("Выберите хотя бы один показатель для расчёта.");
-        return;
-      }
-
-      const payload = {
-        row_questions: rowQuestions,
-        col_questions: colQuestions,
-        metrics,
-      };
 
       const response = await fetch(`${apiUrl}/crosstab`, {
         method: "POST",
@@ -561,8 +573,42 @@
       const data = await response.json();
       const tables = data.tables || [];
       const info = document.getElementById("crosstabInfo");
-      info.textContent = `Построено таблиц: ${tables.length}. Вопросов в строках: ${rowQuestions.length}. Срезов в столбцах: ${colQuestions.length}. Метрик: ${metrics.length}.`;
+      info.textContent = `Построено таблиц: ${tables.length}. Вопросов в строках: ${payload.row_questions.length}. Срезов в столбцах: ${payload.col_questions.length}. Метрик: ${payload.metrics.length}.`;
       document.getElementById("result").innerHTML = tables.map(renderSingleTable).join("");
+    });
+
+    document.getElementById("export").addEventListener("click", async () => {
+      const payload = buildRequestPayload();
+      if (!payload) {
+        return;
+      }
+
+      const response = await fetch(`${apiUrl}/export/xlsx`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        let message = response.statusText;
+        try {
+          const errorPayload = await response.json();
+          message = errorPayload.detail || message;
+        } catch (error) {
+        }
+        alert(`Ошибка выгрузки: ${message}`);
+        return;
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "crosstab_export.xlsx";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
     });
 
     renderQuestionList("rowQuestionList", "rowQuestions");
