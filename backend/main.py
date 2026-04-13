@@ -189,32 +189,41 @@ def get_question_categories(df: pd.DataFrame, question: dict) -> list[dict]:
 def format_metric_value(metric: str, count: int, base: int) -> float | int:
     if metric == "count":
         return int(count)
-    return round((count / base * 100) if base else 0, 2)
+    return int(round((count / base * 100) if base else 0))
 
 
 def build_metric_table(
     df: pd.DataFrame,
     row_question: dict,
-    col_question: dict,
+    col_questions: list[dict],
     metric: str,
 ) -> dict:
     row_answered_mask = get_answered_mask(df, row_question)
     row_categories = get_question_categories(df, row_question)
-    col_categories = get_question_categories(df, col_question)
-
     base_total = int(row_answered_mask.sum())
-    columns = []
 
-    for col_category in col_categories:
-        base_mask = row_answered_mask & col_category["mask"]
-        base = int(base_mask.sum())
-        columns.append(
-            {
-                "label": col_category["label"],
-                "base": base,
-                "mask": base_mask,
-            }
-        )
+    columns = [
+        {
+            "group": "Итого",
+            "label": "Итого",
+            "base": base_total,
+            "mask": row_answered_mask,
+        }
+    ]
+
+    for col_question in col_questions:
+        col_categories = get_question_categories(df, col_question)
+        for col_category in col_categories:
+            base_mask = row_answered_mask & col_category["mask"]
+            base = int(base_mask.sum())
+            columns.append(
+                {
+                    "group": col_question["name"],
+                    "label": col_category["label"],
+                    "base": base,
+                    "mask": base_mask,
+                }
+            )
 
     rows = []
     for row_category in row_categories:
@@ -223,23 +232,32 @@ def build_metric_table(
         for column in columns:
             count = int((column["mask"] & row_category["mask"]).sum())
             row_values[column["label"]] = format_metric_value(metric, count, column["base"])
-
-        total_count = int((row_answered_mask & row_category["mask"]).sum())
-        row_values["Итого"] = format_metric_value(metric, total_count, base_total)
         rows.append({"label": row_category["label"], "values": row_values})
 
-    bases = {column["label"]: column["base"] for column in columns}
-    bases["Итого"] = base_total
+    column_keys = [f"col_{index}" for index in range(len(columns))]
+    column_labels = {key: column["label"] for key, column in zip(column_keys, columns)}
+    column_groups = {key: column["group"] for key, column in zip(column_keys, columns)}
+    bases = {key: column["base"] for key, column in zip(column_keys, columns)}
+
+    normalized_rows = []
+    for row in rows:
+        normalized_values = {
+            key: row["values"][column["label"]]
+            for key, column in zip(column_keys, columns)
+        }
+        normalized_rows.append({"label": row["label"], "values": normalized_values})
 
     return {
         "row_question": row_question["name"],
-        "col_question": col_question["name"],
+        "col_question": ", ".join(col_question["name"] for col_question in col_questions),
         "row_kind": row_question["kind"],
-        "col_kind": col_question["kind"],
+        "col_kind": "combined",
         "metric": metric,
         "metric_label": "Количество (N)" if metric == "count" else "% по столбцу",
-        "column_labels": [column["label"] for column in columns] + ["Итого"],
-        "rows": rows,
+        "column_order": column_keys,
+        "column_labels": column_labels,
+        "column_groups": column_groups,
+        "rows": normalized_rows,
         "bases": bases,
         "base_description": "База - фактическое количество ответивших на вопрос в каждой группе.",
     }
@@ -271,9 +289,8 @@ def build_tables_for_request(req: CrosstabRequest) -> dict:
     df, row_questions, col_questions, metrics = resolve_crosstab_request(req)
 
     tables = [
-        build_metric_table(df, row_question, col_question, metric)
+        build_metric_table(df, row_question, col_questions, metric)
         for row_question in row_questions
-        for col_question in col_questions
         for metric in metrics
     ]
 
@@ -286,16 +303,18 @@ def build_tables_for_request(req: CrosstabRequest) -> dict:
 
 
 def append_table_to_sheet_rows(sheet_rows: list[list], table: dict):
-    sheet_rows.append([f'{table["row_question"]} x {table["col_question"]}'])
+    column_order = table["column_order"]
+    sheet_rows.append([table["row_question"]])
     sheet_rows.append([table["metric_label"]])
-    sheet_rows.append(["Варианты ответа", *table["column_labels"]])
+    sheet_rows.append(["Срез", *[table["column_groups"][column_key] for column_key in column_order]])
+    sheet_rows.append(["Варианты ответа", *[table["column_labels"][column_key] for column_key in column_order]])
 
     for row in table["rows"]:
         sheet_rows.append(
-            [row["label"], *[row["values"].get(column_label, 0) for column_label in table["column_labels"]]]
+            [row["label"], *[row["values"].get(column_key, 0) for column_key in column_order]]
         )
 
-    sheet_rows.append(["База", *[table["bases"].get(column_label, 0) for column_label in table["column_labels"]]])
+    sheet_rows.append(["База", *[table["bases"].get(column_key, 0) for column_key in column_order]])
     sheet_rows.append([table["base_description"]])
     sheet_rows.append([])
 
@@ -323,6 +342,22 @@ def build_export_workbook(tables: list[dict]) -> BytesIO:
                 index=False,
                 header=False,
             )
+
+            worksheet = writer.sheets[sheet_name]
+            if metric == "percent":
+                row_idx = 1
+                for table in metric_tables:
+                    row_idx += 4
+                    data_row_count = len(table["rows"])
+                    start_col = 2
+                    end_col = len(table["column_order"]) + 1
+                    for excel_row in range(row_idx, row_idx + data_row_count):
+                        for excel_col in range(start_col, end_col + 1):
+                            cell = worksheet.cell(row=excel_row, column=excel_col)
+                            cell.value = (cell.value or 0) / 100
+                            cell.number_format = "0%"
+                    row_idx += data_row_count + 3
+                # Base and descriptive rows stay numeric/text without percent format.
 
     output.seek(0)
     return output

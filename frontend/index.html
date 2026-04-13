@@ -400,46 +400,74 @@
 
     function formatCellValue(metric, value) {
       if (metric === "percent") {
-        return `${Number(value).toFixed(2)}%`;
+        return `${Math.round(Number(value) || 0)}%`;
       }
       return String(value);
     }
 
     function renderSingleTable(tableData) {
-      const headers = tableData.column_labels || [];
+      const columnOrder = tableData.column_order || [];
+      const columnLabels = tableData.column_labels || {};
+      const columnGroups = tableData.column_groups || {};
       const rows = tableData.rows || [];
       let html = `
         <div class="table-card">
-          <h3>${escapeHtml(tableData.row_question)} × ${escapeHtml(tableData.col_question)}</h3>
+          <h3>${escapeHtml(tableData.row_question)}</h3>
           <div class="info-line"><strong>Показатель:</strong> ${escapeHtml(tableData.metric_label)}</div>
       `;
 
-      if (!headers.length) {
+      if (!columnOrder.length) {
         html += '<div class="info-line">Нет доступных столбцов для отображения.</div></div>';
         return html;
       }
 
-      html += '<div class="table-scroll"><table><thead><tr><th>Варианты ответа</th>';
-      headers.forEach((header) => {
-        html += `<th>${escapeHtml(header)}</th>`;
+      const groupCells = [];
+      let currentGroup = null;
+      let currentSpan = 0;
+
+      columnOrder.forEach((columnKey) => {
+        const group = columnGroups[columnKey] || "";
+        if (group === currentGroup) {
+          currentSpan += 1;
+        } else {
+          if (currentGroup !== null) {
+            groupCells.push({ group: currentGroup, span: currentSpan });
+          }
+          currentGroup = group;
+          currentSpan = 1;
+        }
+      });
+
+      if (currentGroup !== null) {
+        groupCells.push({ group: currentGroup, span: currentSpan });
+      }
+
+      html += '<div class="table-scroll"><table><thead>';
+      html += '<tr><th rowspan="2">Варианты ответа</th>';
+      groupCells.forEach((cell) => {
+        html += `<th colspan="${cell.span}">${escapeHtml(cell.group)}</th>`;
+      });
+      html += '</tr><tr>';
+      columnOrder.forEach((columnKey) => {
+        html += `<th>${escapeHtml(columnLabels[columnKey] || "")}</th>`;
       });
       html += '</tr></thead><tbody>';
 
       if (!rows.length) {
-        html += `<tr><td colspan="${headers.length + 1}">Нет данных для отображения.</td></tr>`;
+        html += `<tr><td colspan="${columnOrder.length + 1}">Нет данных для отображения.</td></tr>`;
       } else {
         rows.forEach((row) => {
           html += `<tr><td>${escapeHtml(row.label)}</td>`;
-          headers.forEach((header) => {
-            html += `<td>${formatCellValue(tableData.metric, row.values?.[header] ?? 0)}</td>`;
+          columnOrder.forEach((columnKey) => {
+            html += `<td>${formatCellValue(tableData.metric, row.values?.[columnKey] ?? 0)}</td>`;
           });
           html += '</tr>';
         });
       }
 
       html += '<tr class="base-row"><th>База</th>';
-      headers.forEach((header) => {
-        html += `<td>${tableData.bases?.[header] ?? 0}</td>`;
+      columnOrder.forEach((columnKey) => {
+        html += `<td>${tableData.bases?.[columnKey] ?? 0}</td>`;
       });
       html += '</tr>';
       html += '</tbody></table></div>';
