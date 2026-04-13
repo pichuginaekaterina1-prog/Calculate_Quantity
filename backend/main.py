@@ -1,4 +1,5 @@
 from io import BytesIO
+from pathlib import Path
 from uuid import uuid4
 
 import pandas as pd
@@ -21,6 +22,8 @@ FALSE_LIKE_VALUES = {
     "не выбрано",
     "не выбран",
 }
+UPLOAD_DIR = Path(__file__).resolve().parent / "uploads_cache"
+UPLOAD_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="Survey Cross-tab API")
 
@@ -33,6 +36,7 @@ app.add_middleware(
 
 storage = {
     "uploads": {},
+    "latest_upload_id": None,
 }
 
 
@@ -69,10 +73,28 @@ def health():
 
 
 def get_upload_data(upload_id: str | None) -> dict:
-    if not upload_id:
-        raise HTTPException(status_code=400, detail="upload_id is required")
+    resolved_upload_id = upload_id or storage["latest_upload_id"]
+    if not resolved_upload_id:
+        raise HTTPException(status_code=404, detail="No data uploaded")
 
-    upload_data = storage["uploads"].get(upload_id)
+    upload_data = storage["uploads"].get(resolved_upload_id)
+    if upload_data is not None:
+        return upload_data
+
+    cache_path = UPLOAD_DIR / f"{resolved_upload_id}.pkl"
+    if cache_path.exists():
+        upload_data = pd.read_pickle(cache_path)
+        storage["uploads"][resolved_upload_id] = upload_data
+        storage["latest_upload_id"] = resolved_upload_id
+        return upload_data
+
+    if upload_id is None and storage["latest_upload_id"]:
+        fallback_path = UPLOAD_DIR / f"{storage['latest_upload_id']}.pkl"
+        if fallback_path.exists():
+            upload_data = pd.read_pickle(fallback_path)
+            storage["uploads"][storage["latest_upload_id"]] = upload_data
+            return upload_data
+
     if upload_data is None:
         raise HTTPException(status_code=404, detail="No data uploaded")
 
@@ -560,12 +582,15 @@ async def upload_excel(file: UploadFile = File(...)):
     questions_meta, question_map = build_question_catalog(df)
 
     upload_id = uuid4().hex
-    storage["uploads"][upload_id] = {
+    upload_data = {
         "df": df,
         "columns": df.columns.astype(str).tolist(),
         "questions_meta": questions_meta,
         "question_map": question_map,
     }
+    storage["uploads"][upload_id] = upload_data
+    storage["latest_upload_id"] = upload_id
+    pd.to_pickle(upload_data, UPLOAD_DIR / f"{upload_id}.pkl")
 
     return {
         "upload_id": upload_id,

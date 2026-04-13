@@ -387,6 +387,7 @@
   <script>
     const apiUrl = window.API_URL || "https://calculate-quantity.onrender.com";
     let questions = [];
+    let uploadId = null;
 
     function escapeHtml(value) {
       return String(value)
@@ -536,9 +537,19 @@
     }
 
     async function fetchQuestions() {
-      const response = await fetch(`${apiUrl}/questions`);
+      if (!uploadId) {
+        throw new Error("Сначала загрузите файл.");
+      }
+
+      const response = await fetch(`${apiUrl}/questions?upload_id=${encodeURIComponent(uploadId)}`);
       if (!response.ok) {
-        throw new Error("Данные ещё не загружены");
+        let message = "Данные ещё не загружены";
+        try {
+          const errorPayload = await response.json();
+          message = errorPayload.detail || message;
+        } catch (error) {
+        }
+        throw new Error(message);
       }
 
       const payload = await response.json();
@@ -577,6 +588,11 @@
     }
 
     function buildRequestPayload() {
+      if (!uploadId) {
+        alert("Сначала загрузите файл Excel.");
+        return null;
+      }
+
       const rowQuestions = getSelectedValues("rowQuestions");
       const colQuestions = getSelectedValues("colQuestions");
       const metrics = getSelectedMetrics();
@@ -592,6 +608,7 @@
       }
 
       return {
+        upload_id: uploadId,
         row_questions: rowQuestions,
         col_questions: colQuestions,
         metrics,
@@ -632,6 +649,7 @@
         }
 
         const data = await response.json();
+        uploadId = data.upload_id;
         status.textContent = `Загружено ${data.rows} строк, ${data.columns.length} столбцов, ${data.questions.length} вопросов/блоков.`;
         document.getElementById("result").innerHTML = "";
         document.getElementById("crosstabInfo").textContent = "";
