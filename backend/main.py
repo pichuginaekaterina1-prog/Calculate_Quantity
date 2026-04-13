@@ -6,6 +6,7 @@ import pandas as pd
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 from pydantic import BaseModel
 
@@ -515,47 +516,59 @@ def build_export_workbook(tables: list[dict]) -> BytesIO:
         "low_base": PatternFill(fill_type="solid", fgColor="DADAD8"),
     }
 
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for metric, sheet_name in metric_to_sheet.items():
-            metric_tables = [table for table in tables if table["metric"] == metric]
-            if not metric_tables:
-                continue
+    workbook = Workbook()
+    workbook.remove(workbook.active)
 
-            sheet_rows = []
-            for table in metric_tables:
-                append_table_to_sheet_rows(sheet_rows, table)
+    for metric, sheet_name in metric_to_sheet.items():
+        metric_tables = [table for table in tables if table["metric"] == metric]
+        if not metric_tables:
+            continue
 
-            pd.DataFrame(sheet_rows).to_excel(
-                writer,
-                sheet_name=sheet_name,
-                index=False,
-                header=False,
-            )
+        worksheet = workbook.create_sheet(title=sheet_name)
+        current_row = 1
 
-            worksheet = writer.sheets[sheet_name]
-            row_idx = 1
-            for table in metric_tables:
-                data_start_row = row_idx + 3
-                data_row_count = len(table["rows"])
-                start_col = 2
-                end_col = len(table["column_order"]) + 1
+        for table in metric_tables:
+            column_order = table["column_order"]
+            worksheet.cell(row=current_row, column=1, value=table["row_question"])
+            current_row += 1
+            worksheet.cell(row=current_row, column=1, value=table["metric_label"])
+            current_row += 1
 
-                if metric == "percent":
-                    for excel_row in range(data_start_row, data_start_row + data_row_count):
-                        row_offset = excel_row - data_start_row
-                        for excel_col in range(start_col, end_col + 1):
-                            column_offset = excel_col - start_col
-                            cell = worksheet.cell(row=excel_row, column=excel_col)
-                            cell.value = (cell.value or 0) / 100
-                            cell.number_format = "0%"
+            worksheet.cell(row=current_row, column=1, value="Срез")
+            for col_idx, column_key in enumerate(column_order, start=2):
+                worksheet.cell(row=current_row, column=col_idx, value=table["column_groups"][column_key])
+            current_row += 1
 
-                            style_key = table["rows"][row_offset].get("styles", {}).get(
-                                table["column_order"][column_offset]
-                            )
-                            if style_key in fills:
-                                cell.fill = fills[style_key]
+            worksheet.cell(row=current_row, column=1, value="Варианты ответа")
+            for col_idx, column_key in enumerate(column_order, start=2):
+                worksheet.cell(row=current_row, column=col_idx, value=table["column_labels"][column_key])
+            current_row += 1
 
-                row_idx = data_start_row + data_row_count + 3
+            for row_data in table["rows"]:
+                worksheet.cell(row=current_row, column=1, value=row_data["label"])
+                for col_idx, column_key in enumerate(column_order, start=2):
+                    value = row_data["values"].get(column_key, 0)
+                    cell = worksheet.cell(row=current_row, column=col_idx)
+                    if metric == "percent":
+                        cell.value = (value or 0) / 100
+                        cell.number_format = "0%"
+                    else:
+                        cell.value = value
+
+                    style_key = row_data.get("styles", {}).get(column_key)
+                    if style_key in fills:
+                        cell.fill = fills[style_key]
+                current_row += 1
+
+            worksheet.cell(row=current_row, column=1, value="База")
+            for col_idx, column_key in enumerate(column_order, start=2):
+                worksheet.cell(row=current_row, column=col_idx, value=table["bases"].get(column_key, 0))
+            current_row += 1
+
+            worksheet.cell(row=current_row, column=1, value=table["base_description"])
+            current_row += 2
+
+    workbook.save(output)
 
     output.seek(0)
     return output
